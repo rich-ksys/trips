@@ -34,6 +34,7 @@
   .actions { display: flex; gap: 8px; margin-bottom: 8px; }
   .btn { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 12px 14px; border-radius: var(--radius-sm); border: 0.5px solid var(--border2); background: var(--bg); color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer; flex: 1; -webkit-tap-highlight-color: transparent; transition: opacity 0.15s; }
   .btn:active { opacity: 0.6; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .btn svg { width: 18px; height: 18px; flex-shrink: 0; }
   .btn.voice-on { border-color: var(--danger); color: var(--danger); animation: blink 1s infinite; }
@@ -53,9 +54,12 @@
   .meta { display: flex; align-items: center; gap: 4px; }
   .meta svg { width: 14px; height: 14px; }
   .empty { text-align: center; padding: 40px 20px; color: var(--text3); font-size: 14px; }
-  .empty svg { width: 48px; height: 48px; margin-bottom: 12px; opacity: 0.35; }
-
-  /* Modal */
+  .empty svg { width: 48px; height: 48px; margin-bottom: 12px; opacity: 0.35; display: block; margin-left: auto; margin-right: auto; }
+  .status-bar { font-size: 12px; text-align: center; padding: 6px; border-radius: var(--radius-sm); margin-bottom: 12px; display: none; }
+  .status-bar.error { display: block; background: var(--danger-bg); color: var(--danger); }
+  .status-bar.loading { display: block; background: var(--bg3); color: var(--text2); }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--text3); border-top-color: var(--text2); border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 6px; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 200; align-items: flex-end; justify-content: center; }
   .backdrop.open { display: flex; }
   .sheet { background: var(--bg); border-radius: 20px 20px 0 0; padding: 20px 20px 40px; width: 100%; max-width: 480px; }
@@ -71,8 +75,6 @@
   .field textarea { resize: vertical; min-height: 70px; }
   .sheet-btns { display: flex; gap: 10px; margin-top: 16px; }
   .sheet-btns .btn { padding: 14px; font-size: 15px; }
-
-  /* Confirm delete */
   .confirm-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 300; align-items: center; justify-content: center; }
   .confirm-overlay.open { display: flex; }
   .confirm-box { background: var(--bg); border-radius: var(--radius); padding: 20px; width: 280px; text-align: center; }
@@ -87,18 +89,16 @@
 <div class="app">
   <h1>🚗 Trip Tracker</h1>
   <p class="subtitle">Business mileage log</p>
-
   <div class="stats">
     <div class="stat">
       <div class="stat-label">Total trips</div>
-      <div class="stat-value" id="stat-trips">0</div>
+      <div class="stat-value" id="stat-trips">—</div>
     </div>
     <div class="stat">
       <div class="stat-label">Total miles</div>
-      <div class="stat-value" id="stat-miles">0.0</div>
+      <div class="stat-value" id="stat-miles">—</div>
     </div>
   </div>
-
   <div class="actions">
     <button class="btn primary" onclick="openAdd()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -114,12 +114,11 @@
     </button>
   </div>
   <p class="voice-hint" id="voice-hint"></p>
-
+  <div class="status-bar" id="status-bar"></div>
   <div class="section-label">Trips</div>
   <div id="trip-list"></div>
 </div>
 
-<!-- Add/Edit Sheet -->
 <div class="backdrop" id="modal" onclick="backdropTap(event)">
   <div class="sheet">
     <h2 id="modal-title">Add trip</h2>
@@ -136,13 +135,12 @@
       <input type="number" id="f-miles" placeholder="0" min="0" step="0.1" inputmode="decimal">
     </div>
     <div class="sheet-btns">
-      <button class="btn primary" style="flex:2" onclick="saveTrip()">Save</button>
+      <button class="btn primary" style="flex:2" id="save-btn" onclick="saveTrip()">Save</button>
       <button class="btn" onclick="closeModal()">Cancel</button>
     </div>
   </div>
 </div>
 
-<!-- Confirm Delete -->
 <div class="confirm-overlay" id="confirm-overlay">
   <div class="confirm-box">
     <h3>Delete trip?</h3>
@@ -155,72 +153,77 @@
 </div>
 
 <script>
-let trips = [];
-let editId = null;
+const API_BASE = 'http://kinchhome.duckdns.org:8080';
+const API_KEY  = '9b52eaaaaa7ce220f890c86fa490a802d8c9859b9dd4058087ddd63231ba431e';
+
+let trips    = [];
+let editId   = null;
 let deleteId = null;
 let recognition = null;
 let isListening = false;
 
-const STORAGE_KEY = 'biz_trips_v1';
+async function apiFetch(path, options = {}) {
+  const res = await fetch(API_BASE + path, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY, ...(options.headers || {}) }
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'HTTP ' + res.status);
+  }
+  return res.status === 204 ? null : res.json();
+}
 
-function saveLocal() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(trips)); } catch(e) {}
+function showStatus(msg, type) {
+  const el = document.getElementById('status-bar');
+  el.className = 'status-bar ' + type;
+  el.innerHTML = type === 'loading' ? '<span class="spinner"></span>' + msg : msg;
 }
-function loadLocal() {
-  try { const d = localStorage.getItem(STORAGE_KEY); if (d) trips = JSON.parse(d); } catch(e) {}
-}
+function hideStatus() { document.getElementById('status-bar').className = 'status-bar'; }
 
 function today() { return new Date().toISOString().slice(0,10); }
-
 function fmtDate(d) {
   if (!d) return '';
-  const dt = new Date(d + 'T12:00:00');
-  return dt.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+  return new Date(d + 'T12:00:00').toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
 }
-
-function esc(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function render() {
   document.getElementById('stat-trips').textContent = trips.length;
   const total = trips.reduce((s,t) => s + parseFloat(t.miles||0), 0);
   document.getElementById('stat-miles').textContent = total.toFixed(1);
-
   const list = document.getElementById('trip-list');
   if (!trips.length) {
-    list.innerHTML = `<div class="empty">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h18M3 6l9-3 9 3M3 18l9 3 9-3"/></svg>
-      <div>No trips yet.<br>Tap Add trip or use Voice.</div>
-    </div>`;
+    list.innerHTML = '<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 12h18M3 6l9-3 9 3M3 18l9 3 9-3"/></svg><div>No trips yet.<br>Tap Add trip or use Voice.</div></div>';
     return;
   }
-  const sorted = [...trips].sort((a,b) => new Date(b.date)-new Date(a.date));
-  list.innerHTML = sorted.map(t => `
+  list.innerHTML = trips.map(t => `
     <div class="trip-card">
       <div class="card-top">
         <div class="card-desc">${esc(t.description)}</div>
         <div class="card-btns">
-          <button class="icon-btn" onclick="openEdit('${t.id}')" aria-label="Edit trip">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          </button>
-          <button class="icon-btn del" onclick="askDelete('${t.id}','${esc(t.description).slice(0,40)}')" aria-label="Delete trip">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-          </button>
+          <button class="icon-btn" onclick="openEdit(${t.id})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+          <button class="icon-btn del" onclick="askDelete(${t.id},'${esc(t.description).slice(0,40)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
         </div>
       </div>
       <div class="card-meta">
-        <span class="meta">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          ${fmtDate(t.date)}
-        </span>
-        <span class="meta">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>
-          ${parseFloat(t.miles).toFixed(1)} miles
-        </span>
+        <span class="meta"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${fmtDate(t.trip_date)}</span>
+        <span class="meta"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12,6 12,12 16,14"/></svg>${parseFloat(t.miles).toFixed(1)} miles</span>
       </div>
-    </div>
-  `).join('');
+    </div>`).join('');
+}
+
+async function loadTrips() {
+  showStatus('Loading trips…', 'loading');
+  try {
+    const data = await apiFetch('/trips');
+    trips = data.trips;
+    hideStatus();
+    render();
+  } catch(e) {
+    showStatus('Could not connect to database: ' + e.message, 'error');
+    render();
+  }
 }
 
 function openAdd() {
@@ -239,7 +242,7 @@ function openEdit(id) {
   editId = id;
   document.getElementById('modal-title').textContent = 'Edit trip';
   document.getElementById('f-desc').value = t.description;
-  document.getElementById('f-date').value = t.date;
+  document.getElementById('f-date').value = t.trip_date;
   document.getElementById('f-miles').value = t.miles;
   document.getElementById('modal').classList.add('open');
 }
@@ -247,23 +250,26 @@ function openEdit(id) {
 function closeModal() { document.getElementById('modal').classList.remove('open'); }
 function backdropTap(e) { if (e.target === document.getElementById('modal')) closeModal(); }
 
-function saveTrip() {
-  const desc = document.getElementById('f-desc').value.trim();
-  const date = document.getElementById('f-date').value;
+async function saveTrip() {
+  const desc  = document.getElementById('f-desc').value.trim();
+  const date  = document.getElementById('f-date').value;
   const miles = parseFloat(document.getElementById('f-miles').value);
-  if (!desc || !date || isNaN(miles) || miles < 0) {
-    alert('Please fill in all fields with valid values.');
-    return;
+  if (!desc || !date || isNaN(miles) || miles < 0) { alert('Please fill in all fields with valid values.'); return; }
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    if (editId) {
+      await apiFetch('/trips/' + editId, { method: 'PUT', body: JSON.stringify({ trip_date: date, description: desc, miles }) });
+    } else {
+      await apiFetch('/trips', { method: 'POST', body: JSON.stringify({ trip_date: date, description: desc, miles }) });
+    }
+    closeModal();
+    await loadTrips();
+  } catch(e) {
+    alert('Save failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save';
   }
-  if (editId) {
-    const t = trips.find(x => x.id === editId);
-    if (t) { t.description = desc; t.date = date; t.miles = miles; }
-  } else {
-    trips.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2,5), description: desc, date, miles });
-  }
-  saveLocal();
-  render();
-  closeModal();
 }
 
 function askDelete(id, descPreview) {
@@ -271,27 +277,22 @@ function askDelete(id, descPreview) {
   document.getElementById('confirm-desc').textContent = '"' + descPreview + '"';
   document.getElementById('confirm-overlay').classList.add('open');
 }
-function confirmDelete() {
-  trips = trips.filter(x => x.id !== deleteId);
-  deleteId = null;
-  saveLocal();
-  render();
+async function confirmDelete() {
   document.getElementById('confirm-overlay').classList.remove('open');
-}
-function cancelDelete() {
+  try {
+    await apiFetch('/trips/' + deleteId, { method: 'DELETE' });
+    await loadTrips();
+  } catch(e) { showStatus('Delete failed: ' + e.message, 'error'); }
   deleteId = null;
-  document.getElementById('confirm-overlay').classList.remove('open');
 }
+function cancelDelete() { deleteId = null; document.getElementById('confirm-overlay').classList.remove('open'); }
 
 function exportCSV() {
   if (!trips.length) { alert('No trips to export yet.'); return; }
-  const sorted = [...trips].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sorted = [...trips].sort((a,b) => new Date(a.trip_date)-new Date(b.trip_date));
   let csv = 'Date,Description,Miles\r\n';
-  sorted.forEach(t => {
-    csv += `${fmtDate(t.date)},"${t.description.replace(/"/g,'""')}",${parseFloat(t.miles).toFixed(1)}\r\n`;
-  });
-  const total = sorted.reduce((s,t) => s + parseFloat(t.miles), 0);
-  csv += `\r\nTotal,,${total.toFixed(1)}\r\n`;
+  sorted.forEach(t => { csv += `${fmtDate(t.trip_date)},"${t.description.replace(/"/g,'""')}",${parseFloat(t.miles).toFixed(1)}\r\n`; });
+  csv += '\r\nTotal,,' + sorted.reduce((s,t) => s + parseFloat(t.miles), 0).toFixed(1) + '\r\n';
   try {
     const blob = new Blob([csv], {type:'text/csv'});
     const url = URL.createObjectURL(blob);
@@ -300,14 +301,12 @@ function exportCSV() {
     document.body.appendChild(a); a.click();
     document.body.removeChild(a); URL.revokeObjectURL(url);
   } catch(e) {
-    // Fallback for iOS Safari restrictions
     const w = window.open('', '_blank');
     w.document.write('<pre>' + csv + '</pre>');
     w.document.title = 'business_trips.csv';
   }
 }
 
-// Voice
 function setHint(msg, active) {
   const el = document.getElementById('voice-hint');
   el.textContent = msg;
@@ -316,36 +315,16 @@ function setHint(msg, active) {
 
 function toggleVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    setHint('Voice recognition not available on this browser.', false);
-    return;
-  }
+  if (!SR) { setHint('Voice recognition not available on this browser.', false); return; }
   if (isListening) { recognition && recognition.stop(); return; }
-
   recognition = new SR();
   recognition.lang = 'en-GB';
   recognition.interimResults = false;
   recognition.maxAlternatives = 1;
-
-  recognition.onstart = () => {
-    isListening = true;
-    document.getElementById('voice-btn').classList.add('voice-on');
-    setHint('Listening… say e.g. "Client visit Acme, 15th June, 45 miles"', true);
-  };
-  recognition.onend = () => {
-    isListening = false;
-    document.getElementById('voice-btn').classList.remove('voice-on');
-    setHint('', false);
-  };
-  recognition.onerror = (e) => {
-    isListening = false;
-    document.getElementById('voice-btn').classList.remove('voice-on');
-    setHint('Error: ' + e.error, false);
-  };
-  recognition.onresult = (e) => {
-    const text = e.results[0][0].transcript;
-    parseVoice(text);
-  };
+  recognition.onstart = () => { isListening = true; document.getElementById('voice-btn').classList.add('voice-on'); setHint('Listening… say e.g. "Client visit Acme, 15th June, 45 miles"', true); };
+  recognition.onend = () => { isListening = false; document.getElementById('voice-btn').classList.remove('voice-on'); setHint('', false); };
+  recognition.onerror = (e) => { isListening = false; document.getElementById('voice-btn').classList.remove('voice-on'); setHint('Error: ' + e.error, false); };
+  recognition.onresult = (e) => { parseVoice(e.results[0][0].transcript); };
   recognition.start();
 }
 
@@ -353,7 +332,6 @@ function parseVoice(text) {
   const t = text.toLowerCase();
   const milesMatch = t.match(/(\d+(?:\.\d+)?)\s*miles?/);
   const miles = milesMatch ? parseFloat(milesMatch[1]) : '';
-
   let date = today();
   const months = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
   const dm = t.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*(\d{4})?/);
@@ -364,7 +342,6 @@ function parseVoice(text) {
   } else if (/yesterday/.test(t)) {
     const d = new Date(); d.setDate(d.getDate()-1); date = d.toISOString().slice(0,10);
   }
-
   let desc = text
     .replace(/^(add|log|new|record)\s+(a\s+)?(business\s+)?trip[,:\s]*/i,'')
     .replace(/\b\d+(?:\.\d+)?\s*miles?\b/gi,'')
@@ -372,7 +349,6 @@ function parseVoice(text) {
     .replace(/\b(today|yesterday)\b/gi,'')
     .replace(/[,\s]+$/,'').replace(/^\s+/,'').replace(/\s{2,}/g,' ').trim();
   if (!desc) desc = 'Business trip';
-
   editId = null;
   document.getElementById('modal-title').textContent = 'Confirm voice entry';
   document.getElementById('f-desc').value = desc;
@@ -381,8 +357,7 @@ function parseVoice(text) {
   document.getElementById('modal').classList.add('open');
 }
 
-loadLocal();
-render();
+loadTrips();
 </script>
 </body>
 </html>
